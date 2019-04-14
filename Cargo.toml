@@ -1,0 +1,13 @@
+[package]
+name = "bl_save"
+version = "0.1.0"
+authors = ["ns <portification@gmail.com>"]
+edition = "2018"
+description = "Read Blockland save files."
+repository = "https://github.com/brickadia/bl_save"
+readme = "README.md"
+keywords = ["file", "parser", "blockland"]
+categories = ["encoding"]
+license = "MIT"
+
+[dependencies]
