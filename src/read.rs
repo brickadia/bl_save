@@ -218,17 +218,7 @@ fn expect_eq_next<T: PartialEq>(
 }
 
 fn take_word_consume_space(iter: &mut impl Iterator<Item = char>) -> String {
-	let mut word = String::new();
-
-	while let Some(c) = iter.next() {
-		if c == ' ' {
-			break;
-		}
-
-		word.push(c);
-	}
-
-	word
+	iter.take_while(|c| *c != ' ').collect()
 }
 
 fn float_from_chars(chars: &mut impl Iterator<Item = char>) -> f32 {
