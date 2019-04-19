@@ -23,6 +23,7 @@
 
 mod cp1252;
 mod data;
+mod escape;
 mod read;
 
 pub use data::{Brick, BrickBase};

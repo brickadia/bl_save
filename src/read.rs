@@ -1,46 +1,60 @@
-use crate::data::BrickBase;
-use crate::Brick;
+use crate::{data::BrickBase, escape::collapse, Brick};
 use std::io::{self, prelude::*};
 use std::iter::Peekable;
 
-const BRICK_COUNT_PREFIX: &str = "Linecount ";
+const LINECOUNT_PREFIX: &str = "Linecount ";
 const EXTRA_DATA_PREFIX: &str = "+-";
 
 type Color = (f32, f32, f32, f32);
 type Colors = [Color; 64];
 
+/// Reads save files.
+///
+/// Metadata including the description, colors and usually the brick count
+/// is available on construction. Iterating over the reader yields the bricks.
+///
 pub struct Reader<R: BufRead> {
 	brick_data: Peekable<BrickDataParser<Cp1252Lines<R>>>,
-	description: Vec<String>,
+	description: String,
 	colors: Colors,
-	brick_count: usize,
+	brick_count: Option<usize>,
 }
 
 impl<R: BufRead> Reader<R> {
+	/// Construct a new instance from a
+	/// [`BufRead`](https://doc.rust-lang.org/std/io/trait.BufRead.html) source
+	/// and immediately read metadata.
+	///
+	/// ```rust
+	/// let file = BufReader::new(File::open("House.bls")?);
+	/// let reader = bl_save::Reader::new(file)?;
+	/// ```
 	pub fn new(r: R) -> io::Result<Self> {
 		let mut lines = cp1252_lines(r);
 
 		// This is a Blockland save file.
 		// You probably shouldn't modify it cause you'll screw it up.
-		lines.next().unwrap_or_else(|| Ok(String::from("")))?;
+		read_line(&mut lines)?;
 
 		// Description.
-		let description_line_count = expect_line(&mut lines, "Missing description length")?
-			.parse()
-			.unwrap_or(0);
+		let description_line_count = read_line(&mut lines)?.parse().unwrap_or(0);
 		if description_line_count > 1000 {
 			return Err(invalid_data("Description is unreasonably long"));
 		}
-		let mut description = Vec::with_capacity(description_line_count);
-		for _ in 0..description_line_count {
-			description.push(expect_line(&mut lines, "Missing description line")?);
+		let mut description_escaped = String::new();
+		for line_index in 0..description_line_count {
+			if line_index > 0 {
+				description_escaped.push('\n');
+			}
+			description_escaped.push_str(&read_line(&mut lines)?);
 		}
+		let mut description = String::new();
+		collapse(&mut description, description_escaped.chars());
 
 		// Colors.
 		let mut colors = [Default::default(); 64];
 		for color in colors.iter_mut() {
-			let line = lines.next().unwrap_or_else(|| Ok(String::from("")))?;
-			// TODO: Parse colors
+			let line = read_line(&mut lines)?;
 			let mut chars = line.chars();
 			let r = float_from_chars(&mut chars);
 			let g = float_from_chars(&mut chars);
@@ -49,26 +63,30 @@ impl<R: BufRead> Reader<R> {
 			*color = (r, g, b, a);
 		}
 
-		// Brick count.
-		let brick_count_line = lines.next().unwrap_or_else(|| Ok(String::from("")))?;
-		if !brick_count_line.starts_with(BRICK_COUNT_PREFIX) {
-			return Err(invalid_data("Invalid brick count line"));
+		let mut brick_data = BrickDataParser(lines).peekable();
+
+		// Get the brick count early, if possible. It's usually the first line.
+		let mut brick_count = None;
+
+		if let Some(Ok(BrickLine::Linecount(_))) | Some(Err(_)) = brick_data.peek() {
+			match brick_data.next() {
+				Some(Ok(BrickLine::Linecount(count))) => brick_count = Some(count),
+				Some(Err(e)) => return Err(e),
+				_ => unreachable!(),
+			}
 		}
-		let brick_count = brick_count_line[BRICK_COUNT_PREFIX.len()..]
-			.parse()
-			.unwrap_or(0);
 
 		Ok(Self {
-			brick_data: BrickDataParser(lines).peekable(),
+			brick_data,
 			description,
 			colors,
 			brick_count,
 		})
 	}
 
-	/// The description lines of the save file.
-	/// This will likely become a single string in the future.
-	pub fn description(&self) -> &[String] {
+	/// The description of the save file.
+	/// The reader will refuse to read more than 1,000 lines.
+	pub fn description(&self) -> &str {
 		&self.description
 	}
 
@@ -77,8 +95,12 @@ impl<R: BufRead> Reader<R> {
 		&self.colors
 	}
 
-	/// The claimed brick count. Not guaranteed to be correct.
-	pub fn brick_count(&self) -> usize {
+	/// The claimed brick count, if available. Not guaranteed to be correct.
+	///
+	/// The reader will attempt to make this available on construction,
+	/// but that isn't guaranteed if the brick count is in a non-standard location or absent.
+	/// It may become available during brick iteration.
+	pub fn brick_count(&self) -> Option<usize> {
 		self.brick_count
 	}
 }
@@ -87,45 +109,55 @@ impl<R: BufRead> Iterator for Reader<R> {
 	type Item = io::Result<Brick>;
 
 	fn next(&mut self) -> Option<Self::Item> {
-		let first = match self.brick_data.next() {
-			Some(Ok(BrickLine::Base(data))) => data,
-			Some(Ok(BrickLine::Extra(_))) => {
-				panic!("previous iteration should have handled extra brick data")
-			}
-			Some(Err(e)) => return Some(Err(e)),
-			None => return None,
-		};
-
-		let mut brick = Brick {
-			base: first,
-			unknown_extra: Vec::new(),
-		};
-
 		loop {
-			match self.brick_data.peek() {
-				Some(Ok(BrickLine::Extra(_))) => {}
-				Some(Ok(BrickLine::Base(_))) | None => break,
-				Some(Err(_)) => {
-					let e = match self.brick_data.next() {
-						Some(Err(e)) => e,
-						_ => panic!("variant changed from peek() to next()"),
-					};
-					return Some(Err(e));
+			let first = match self.brick_data.next() {
+				Some(Ok(BrickLine::Base(data))) => data,
+				Some(Ok(BrickLine::Extra(_))) => {
+					panic!("previous iteration should have handled extra brick data")
+				}
+				Some(Ok(BrickLine::Linecount(count))) => {
+					self.brick_count = Some(count);
+					continue;
+				}
+				Some(Err(e)) => return Some(Err(e)),
+				None => return None,
+			};
+
+			let mut brick = Brick {
+				base: first,
+				unknown_extra: Vec::new(),
+			};
+
+			loop {
+				match self.brick_data.peek() {
+					Some(Ok(BrickLine::Extra(_))) => {}
+					Some(Ok(_)) | None => break,
+					Some(Err(_)) => {
+						let e = match self.brick_data.next() {
+							Some(Err(e)) => e,
+							_ => panic!("variant changed from peek() to next()"),
+						};
+						return Some(Err(e));
+					}
+				}
+
+				let extra = match self.brick_data.next() {
+					Some(Ok(BrickLine::Extra(extra))) => extra,
+					_ => panic!("variant changed from peek() to next()"),
+				};
+
+				match extra {
+					BrickExtra::Unknown(s) => brick.unknown_extra.push(s),
 				}
 			}
 
-			let extra = match self.brick_data.next() {
-				Some(Ok(BrickLine::Extra(extra))) => extra,
-				_ => panic!("variant changed from peek() to next()"),
-			};
-
-			match extra {
-				BrickExtra::Unknown(s) => brick.unknown_extra.push(s),
-			}
+			return Some(Ok(brick));
 		}
-
-		Some(Ok(brick))
 	}
+}
+
+fn read_line(mut lines: impl Iterator<Item = io::Result<String>>) -> io::Result<String> {
+	lines.next().unwrap_or_else(|| Ok(String::from("")))
 }
 
 struct BrickDataParser<L>(L);
@@ -141,6 +173,9 @@ impl<L: Iterator<Item = io::Result<String>>> Iterator for BrickDataParser<L> {
 fn parse_brick_data_line(line: String) -> io::Result<BrickLine> {
 	if line.starts_with(EXTRA_DATA_PREFIX) {
 		Ok(BrickLine::Extra(BrickExtra::Unknown(line)))
+	} else if line.starts_with(LINECOUNT_PREFIX) {
+		let brick_count = line[LINECOUNT_PREFIX.len()..].parse().unwrap_or(0);
+		Ok(BrickLine::Linecount(brick_count))
 	} else {
 		let quote_index = line
 			.find('"')
@@ -185,6 +220,7 @@ fn parse_brick_data_line(line: String) -> io::Result<BrickLine> {
 enum BrickLine {
 	Base(BrickBase),
 	Extra(BrickExtra),
+	Linecount(usize),
 }
 
 enum BrickExtra {
@@ -193,13 +229,6 @@ enum BrickExtra {
 
 fn invalid_data(error: &str) -> io::Error {
 	io::Error::new(io::ErrorKind::InvalidData, error)
-}
-
-fn expect_line(
-	lines: &mut impl Iterator<Item = io::Result<String>>,
-	error: &str,
-) -> io::Result<String> {
-	lines.next().ok_or_else(|| invalid_data(error))?
 }
 
 fn expect_next<T>(iter: &mut impl Iterator<Item = T>, error: &str) -> io::Result<T> {

@@ -9,14 +9,12 @@ fn main() -> io::Result<()> {
 	let reader = bl_save::Reader::new(BufReader::new(File::open(path)?))?;
 
 	println!("Description:");
-	for line in reader.description() {
-		println!("{}", line);
-	}
+	println!("{}", reader.description());
 
 	let opaque_colors = reader.colors().iter().filter(|c| c.3 >= 1.0).count();
 	println!("Opaque color count: {}", opaque_colors);
 
-	println!("Expected brick count: {}", reader.brick_count());
+	println!("Expected brick count: {:?}", reader.brick_count());
 
 	let mut read_bricks = 0;
 
