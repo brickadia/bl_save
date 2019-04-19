@@ -17,12 +17,9 @@ read the save metadata and iterate over its bricks.
 let file = BufReader::new(File::open("House.bls")?);
 let reader = bl_save::Reader::new(file)?;
 
-for line in reader.description() {
-    println!("{}", line);
-}
-
-assert_eq!(reader.colors().len(), 64);
+println!("Description: {}", reader.description());
 println!("Brick count: {}", reader.brick_count());
+assert_eq!(reader.colors().len(), 64);
 
 for brick in reader {
     let brick = brick?;
